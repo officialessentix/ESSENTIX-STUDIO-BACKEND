@@ -1,122 +1,216 @@
+const http = require('http');
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const { Server } = require('socket.io');
 require('dotenv').config();
 
-const Product = require('./models/product'); 
+const Product = require('./models/product');
 
 const app = express();
+const server = http.createServer(app);
 
-// ✅ CORS Setup: allow both production and local testing
-const allowedOrigins = [
-    'https://essentix-studio-frontend.vercel.app', // Production frontend
-    'http://127.0.0.1:5500',                        // Live Server local testing
-    'http://localhost:5500'                         // Localhost fallback
-];
+const Razorpay = require('razorpay');
 
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID, // You get this from Razorpay Dashboard
+  key_secret: process.env.RAZORPAY_KEY_SECRET, // You get this from Razorpay Dashboard
+});
+
+
+// ================= MIDDLEWARE =================
 app.use(cors({
-    origin: function(origin, callback){
-        // allow requests with no origin (like curl, Postman)
-        if(!origin) return callback(null, true);
-        if(allowedOrigins.indexOf(origin) === -1){
-            const msg = 'CORS policy: This origin is not allowed.';
-            return callback(new Error(msg), false);
-        }
-        return callback(null, true);
-    }
+  origin: [
+    "http://localhost:3000",
+    "http://127.0.0.1:5500", // Common for Live Server
+    "https://essentix-studio-frontend.vercel.app",
+    "https://essentix-backend.onrender.com" // Just in case
+  ],
+  methods: ["GET", "POST", "PUT"],
+  allowedHeaders: ["Content-Type", "x-admin-key"]
 }));
-
-
-
-
 
 app.use(express.json());
-
 app.use(express.urlencoded({ extended: true }));
 
-
-
-// 1. CONNECT TO MONGO
+// ================= DB CONNECTION =================
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ VAULT ONLINE"))
-    .catch(err => console.error("❌ CONNECTION ERROR:", err));
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch(err => {
+    console.error("❌ MongoDB error:", err.message);
+    process.exit(1);
+  });
 
-// 2. DEFINE THE ORDER MODEL [cite: 2026-01-05]
-const Order = mongoose.model('Order', new mongoose.Schema({
-    customerName: String,
-    email: String,
-    pincode: String,
-    city: String,
-    address: String,
-    landmark: { type: String, default: "N/A" }, 
-    items: Array,
-    total: Number,
-    status: { type: String, default: "Pending" },
-    date: { type: Date, default: Date.now }
+// ================= SOCKET.IO =================
+const io = new Server(server, {
+  cors: {
+    origin: "https://essentix-studio-frontend.vercel.app",
+    methods: ["GET", "POST", "PUT"]
+  }
+});
+
+io.on("connection", socket => {
+  console.log("🟢 Admin connected:", socket.id);
+});
+
+// ================= MODELS =================
+const Order = mongoose.model("Order", new mongoose.Schema({
+  customerName: { type: String, required: true },
+  email: { type: String, required: true },
+  pincode: { type: String, required: true },
+  city: { type: String, required: true },
+  address: { type: String, required: true },
+  landmark: { type: String, default: "N/A" },
+  items: { type: Array, required: true },
+  total: { type: Number, required: true },
+  paymentId: { type: String }, // <--- ADD THIS LINE
+  status: { type: String, default: "Pending" },
+  date: { type: Date, default: Date.now }
 }));
 
-// 3. API ROUTES
-app.get('/api/products', async (req, res) => {
-    try {
-        const items = await Product.find();
-        res.json(items);
-    } catch (err) {
-        res.status(500).json({ message: "Error fetching products" });
-    }
+// ================= CONSTANTS =================
+const ADMIN_KEY = process.env.ADMIN_KEY;
+
+// ================= ROUTES =================
+
+// Health check
+app.get("/", (req, res) => {
+  res.send("🚀 Essentix backend running");
 });
 
-// THIS ROUTE FIXES THE "CANNOT POST" ERROR
-app.post('/api/orders', async (req, res) => {
-    console.log("ORDER BODY:", req.body); // 👈 ADD THIS LINE
-    try {
-        const newOrder = new Order(req.body);
-        await newOrder.save();
-        res.status(201).json({ success: true, message: "Order stored" });
-    } catch (err) {
-        console.error("Save Error:", err);
-        res.status(500).json({ success: false, error: err.message });
-    }
+// Get products
+app.get("/api/products", async (req, res) => {
+  try {
+    const products = await Product.find();
+    res.json(products);
+  } catch {
+    res.status(500).json({ message: "Failed to fetch products" });
+  }
 });
 
-// ================= ADMIN ORDERS VIEW =================
-const ADMIN_KEY = process.env.ADMIN_KEY || "essentix-secret";
+// Place order (VALIDATION ADDED)
+app.post("/api/orders", async (req, res) => {
+  try {
+    const { customerName, email, items, total } = req.body;
 
-app.get('/api/admin/orders', async (req, res) => {
-    if (req.headers['x-admin-key'] !== ADMIN_KEY) {
-        return res.status(401).json({ message: "Unauthorized" });
+    if (!customerName || !email || !items?.length || total <= 0) {
+      return res.status(400).json({
+        message: "Invalid order data"
+      });
     }
 
-    try {
-        const orders = await Order.find().sort({ date: -1 });
-        res.json(orders);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
+    const order = new Order(req.body);
+    await order.save();
 
-// ================= UPDATE ORDER STATUS =================
-app.put('/api/admin/order-status/:id', async (req, res) => {
-    if (req.headers['x-admin-key'] !== ADMIN_KEY) {
-        return res.status(401).json({ message: "Unauthorized" });
-    }
+    io.emit("new-order", order);
 
-    try {
-        const { status } = req.body;
-
-        const order = await Order.findByIdAndUpdate(
-            req.params.id,
-            { status },
-            { new: true }
-        );
-
-        res.json(order);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.status(201).json({
+  success: true,
+  orderId: order._id,
+  customerName: order.customerName,
+  total: order.total
 });
 
 
 
+  } catch (err) {
+    res.status(500).json({ message: "Order failed" });
+  }
+});
 
+
+// PUBLIC Order Tracking Route
+app.get("/api/orders/track/:id", async (req, res) => {
+  try {
+    // We look for the order by its MongoDB ID
+    const order = await Order.findById(req.params.id);
+    
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    // We only send back what the customer needs to see (Security)
+    res.json({
+      status: order.status,
+      customerName: order.customerName,
+      date: order.date,
+      total: order.total
+    });
+  } catch (err) {
+    res.status(400).json({ message: "Invalid Order ID format" });
+  }
+});
+
+// ================= PAYMENTS =================
+
+// Create Razorpay Order
+app.post("/api/payments/create-order", async (req, res) => {
+  try {
+    const { amount } = req.body;
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ message: "Invalid amount" });
+    }
+
+    const options = {
+      amount: amount * 100, // Amount in paise
+      currency: "INR",
+      receipt: `receipt_order_${Date.now()}`,
+    };
+
+    const razorpayOrder = await razorpay.orders.create(options);
+    
+    // Send the order details to the frontend
+    res.json(razorpayOrder); 
+  } catch (err) {
+    console.error("Razorpay Error:", err);
+    res.status(500).json({ message: "Could not create Razorpay order" });
+  }
+});
+
+
+// Admin get orders
+app.get("/api/admin/orders", async (req, res) => {
+  if (req.headers["x-admin-key"] !== ADMIN_KEY) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  try {
+    const orders = await Order.find().sort({ date: -1 });
+    res.json(orders);
+  } catch {
+    res.status(500).json({ message: "Failed to load orders" });
+  }
+});
+
+// Update order status (VALIDATION + SOCKET)
+app.put("/api/admin/order-status/:id", async (req, res) => {
+  if (req.headers["x-admin-key"] !== ADMIN_KEY) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  const allowedStatus = ["Pending", "Shipped", "Delivered", "Cancelled"];
+  if (!allowedStatus.includes(req.body.status)) {
+    return res.status(400).json({ message: "Invalid status" });
+  }
+
+  try {
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      { status: req.body.status },
+      { new: true }
+    );
+
+    io.emit("status-updated", order);
+    res.json(order);
+
+  } catch {
+    res.status(500).json({ message: "Status update failed" });
+  }
+});
+
+// ================= START SERVER =================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
+server.listen(PORT, () =>
+  console.log(`🚀 Server running on port ${PORT}`)
+);
