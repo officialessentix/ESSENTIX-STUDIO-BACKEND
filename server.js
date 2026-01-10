@@ -7,9 +7,29 @@ const Product = require('./models/product');
 
 const app = express();
 
+// ✅ CORS Setup: allow both production and local testing
+const allowedOrigins = [
+    'https://essentix-studio-frontend.vercel.app', // Production frontend
+    'http://127.0.0.1:5500',                        // Live Server local testing
+    'http://localhost:5500'                         // Localhost fallback
+];
+
 app.use(cors({
-    origin: 'https://essentix-studio-frontend.vercel.app'
+    origin: function(origin, callback){
+        // allow requests with no origin (like curl, Postman)
+        if(!origin) return callback(null, true);
+        if(allowedOrigins.indexOf(origin) === -1){
+            const msg = 'CORS policy: This origin is not allowed.';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    }
 }));
+
+
+
+
+
 app.use(express.json());
 
 app.use(express.urlencoded({ extended: true }));
