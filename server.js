@@ -189,7 +189,8 @@ app.put("/api/admin/order-status/:id", async (req, res) => {
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const allowedStatus = ["Pending", "Shipped", "Delivered", "Cancelled"];
+  // Change this in your server.js (Backend)
+const allowedStatus = ["Paid & Pending", "Pending", "Shipped", "Delivered", "Cancelled"];
   if (!allowedStatus.includes(req.body.status)) {
     return res.status(400).json({ message: "Invalid status" });
   }
