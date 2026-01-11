@@ -1,42 +1,56 @@
-const http = require('http');
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const { Server } = require('socket.io');
-require('dotenv').config();
+const http = require("http");
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const { Server } = require("socket.io");
+require("dotenv").config();
 
-const Product = require('./models/product');
+const Product = require("./models/product");
 
 const app = express();
 const server = http.createServer(app);
 
-const Razorpay = require('razorpay');
+const Razorpay = require("razorpay");
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID, // You get this from Razorpay Dashboard
   key_secret: process.env.RAZORPAY_KEY_SECRET, // You get this from Razorpay Dashboard
 });
 
+// 1. Define ALL allowed origins clearly
+const allowedOrigins = [
+  "https://essentix-studio-frontend.vercel.app",
+  "http://127.0.0.1:5500",
+  "http://localhost:5500",
+];
 
 // ================= MIDDLEWARE =================
-app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "http://127.0.0.1:5500", // Common for Live Server
-    "https://essentix-studio-frontend.vercel.app",
-    "https://essentix-backend.onrender.com" // Just in case
-  ],
-  methods: ["GET", "POST", "PUT"],
-  allowedHeaders: ["Content-Type", "x-admin-key"]
-}));
+// Replace your existing app.use(cors(...)) with this:
+// 2. Updated Middleware with dynamic origin checking
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps or curl)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.indexOf(origin) === -1) {
+        return callback(new Error("CORS Policy: Origin not allowed"), false);
+      }
+      return callback(null, true);
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "x-admin-key"],
+    credentials: true,
+  })
+);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ================= DB CONNECTION =================
-mongoose.connect(process.env.MONGO_URI)
+mongoose
+  .connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
-  .catch(err => {
+  .catch((err) => {
     console.error("❌ MongoDB error:", err.message);
     process.exit(1);
   });
@@ -44,29 +58,32 @@ mongoose.connect(process.env.MONGO_URI)
 // ================= SOCKET.IO =================
 const io = new Server(server, {
   cors: {
-    origin: "https://essentix-studio-frontend.vercel.app",
-    methods: ["GET", "POST", "PUT"]
-  }
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+  },
 });
 
-io.on("connection", socket => {
+io.on("connection", (socket) => {
   console.log("🟢 Admin connected:", socket.id);
 });
 
 // ================= MODELS =================
-const Order = mongoose.model("Order", new mongoose.Schema({
-  customerName: { type: String, required: true },
-  email: { type: String, required: true },
-  pincode: { type: String, required: true },
-  city: { type: String, required: true },
-  address: { type: String, required: true },
-  landmark: { type: String, default: "N/A" },
-  items: { type: Array, required: true },
-  total: { type: Number, required: true },
-  paymentId: { type: String }, // <--- ADD THIS LINE
-  status: { type: String, default: "Pending" },
-  date: { type: Date, default: Date.now }
-}));
+const Order = mongoose.model(
+  "Order",
+  new mongoose.Schema({
+    customerName: { type: String, required: true },
+    email: { type: String, required: true },
+    pincode: { type: String, required: true },
+    city: { type: String, required: true },
+    address: { type: String, required: true },
+    landmark: { type: String, default: "N/A" },
+    items: { type: Array, required: true },
+    total: { type: Number, required: true },
+    paymentId: { type: String }, // <--- ADD THIS LINE
+    status: { type: String, default: "Pending" },
+    date: { type: Date, default: Date.now },
+  })
+);
 
 // ================= CONSTANTS =================
 const ADMIN_KEY = process.env.ADMIN_KEY;
@@ -95,7 +112,7 @@ app.post("/api/orders", async (req, res) => {
 
     if (!customerName || !email || !items?.length || total <= 0) {
       return res.status(400).json({
-        message: "Invalid order data"
+        message: "Invalid order data",
       });
     }
 
@@ -105,26 +122,22 @@ app.post("/api/orders", async (req, res) => {
     io.emit("new-order", order);
 
     res.status(201).json({
-  success: true,
-  orderId: order._id,
-  customerName: order.customerName,
-  total: order.total
-});
-
-
-
+      success: true,
+      orderId: order._id,
+      customerName: order.customerName,
+      total: order.total,
+    });
   } catch (err) {
     res.status(500).json({ message: "Order failed" });
   }
 });
-
 
 // PUBLIC Order Tracking Route
 app.get("/api/orders/track/:id", async (req, res) => {
   try {
     // We look for the order by its MongoDB ID
     const order = await Order.findById(req.params.id);
-    
+
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
@@ -134,7 +147,7 @@ app.get("/api/orders/track/:id", async (req, res) => {
       status: order.status,
       customerName: order.customerName,
       date: order.date,
-      total: order.total
+      total: order.total,
     });
   } catch (err) {
     res.status(400).json({ message: "Invalid Order ID format" });
@@ -159,15 +172,14 @@ app.post("/api/payments/create-order", async (req, res) => {
     };
 
     const razorpayOrder = await razorpay.orders.create(options);
-    
+
     // Send the order details to the frontend
-    res.json(razorpayOrder); 
+    res.json(razorpayOrder);
   } catch (err) {
     console.error("Razorpay Error:", err);
     res.status(500).json({ message: "Could not create Razorpay order" });
   }
 });
-
 
 // Admin get orders
 app.get("/api/admin/orders", async (req, res) => {
@@ -190,7 +202,13 @@ app.put("/api/admin/order-status/:id", async (req, res) => {
   }
 
   // Change this in your server.js (Backend)
-const allowedStatus = ["Paid & Pending", "Pending", "Shipped", "Delivered", "Cancelled"];
+  const allowedStatus = [
+    "Paid & Pending",
+    "Pending",
+    "Shipped",
+    "Delivered",
+    "Cancelled",
+  ];
   if (!allowedStatus.includes(req.body.status)) {
     return res.status(400).json({ message: "Invalid status" });
   }
@@ -204,14 +222,24 @@ const allowedStatus = ["Paid & Pending", "Pending", "Shipped", "Delivered", "Can
 
     io.emit("status-updated", order);
     res.json(order);
-
   } catch {
     res.status(500).json({ message: "Status update failed" });
   }
 });
 
+// Add this in the ROUTES section of server.js
+app.delete("/api/admin/orders/:id", async (req, res) => {
+  if (req.headers["x-admin-key"] !== ADMIN_KEY) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+  try {
+    await Order.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: "Order deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ message: "Delete failed" });
+  }
+});
+
 // ================= START SERVER =================
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () =>
-  console.log(`🚀 Server running on port ${PORT}`)
-);
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
